@@ -14,7 +14,7 @@ from .modeling import ImageEncoderViT, MaskDecoder, PromptEncoder, Sam, TwoWayTr
 
 
 def build_sam_vit_h(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],
-                    checkpoint=None):
+                    checkpoint=None, in_chans=3):
     return _build_sam(
         encoder_embed_dim=1280,
         encoder_depth=32,
@@ -24,7 +24,8 @@ def build_sam_vit_h(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53
         num_classes=num_classes,
         image_size=image_size,
         pixel_mean=pixel_mean,
-        pixel_std=pixel_std
+        pixel_std=pixel_std,
+        in_chans=in_chans
     )
 
 
@@ -32,7 +33,7 @@ build_sam = build_sam_vit_h
 
 
 def build_sam_vit_l(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],
-                    checkpoint=None):
+                    checkpoint=None, in_chans=3):
     return _build_sam(
         encoder_embed_dim=1024,
         encoder_depth=24,
@@ -42,23 +43,24 @@ def build_sam_vit_l(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53
         num_classes=num_classes,
         image_size=image_size,
         pixel_mean=pixel_mean,
-        pixel_std=pixel_std
+        pixel_std=pixel_std,
+        in_chans=in_chans
     )
 
 
 def build_sam_vit_b(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],
-                    checkpoint=None):
+                    checkpoint=None, in_chans=3):
     return _build_sam(
         encoder_embed_dim=768,
         encoder_depth=12,
         encoder_num_heads=12,
         encoder_global_attn_indexes=[2, 5, 8, 11],
-        # adopt global attention at [3, 6, 9, 12] transform layer, else window attention layer
         checkpoint=checkpoint,
         num_classes=num_classes,
         image_size=image_size,
         pixel_mean=pixel_mean,
-        pixel_std=pixel_std
+        pixel_std=pixel_std,
+        in_chans=in_chans
     )
 
 
@@ -80,6 +82,7 @@ def _build_sam(
         pixel_mean,
         pixel_std,
         checkpoint=None,
+        in_chans=3,
 ):
     prompt_embed_dim = 256
     image_size = image_size
@@ -99,6 +102,7 @@ def _build_sam(
             global_attn_indexes=encoder_global_attn_indexes,
             window_size=14,
             out_chans=prompt_embed_dim,
+            in_chans=in_chans,
         ),
         prompt_encoder=PromptEncoder(
             embed_dim=prompt_embed_dim,

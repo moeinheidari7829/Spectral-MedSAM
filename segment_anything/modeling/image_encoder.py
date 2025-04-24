@@ -86,6 +86,11 @@ class ImageEncoderViT(nn.Module):
             )
             self.blocks.append(block)
 
+        # Print all block types and their indices after blocks are constructed
+        print('Block types in self.blocks:')
+        for i, blk in enumerate(self.blocks):
+            print(f'  Block {i}: {type(blk).__name__}')
+
         self.neck = nn.Sequential(
             nn.Conv2d(
                 embed_dim,
@@ -106,10 +111,12 @@ class ImageEncoderViT(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)  # pre embed: [1, 3, 1024, 1024], post embed: [1, 64, 64, 768]
+        print('After patch_embed:', x.shape)
         if self.pos_embed is not None:
             x = x + self.pos_embed
 
-        for blk in self.blocks:
+        for i, blk in enumerate(self.blocks):
+            print(f'Calling block {i} of type {type(blk).__name__} with input shape {x.shape}')
             x = blk(x)
 
         x = self.neck(x.permute(0, 3, 1, 2))  # [b, c, h, w], [1, 256, 64, 64]
@@ -165,6 +172,15 @@ class Block(nn.Module):
         self.window_size = window_size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        import inspect
+        frame = inspect.currentframe()
+        outer_frames = inspect.getouterframes(frame)
+        block_idx = None
+        for f in outer_frames:
+            if 'for blk_idx, blk in enumerate(self.blocks):' in f.code_context[0] if f.code_context else '':
+                block_idx = f.frame.f_locals.get('blk_idx', None)
+                break
+        print(f'Block.forward input shape: {x.shape}, block_idx: {block_idx}')
         shortcut = x
         x = self.norm1(x)
         # Window partition

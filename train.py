@@ -5,6 +5,7 @@ import random
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
+import torch.nn as nn
 
 from importlib import import_module
 
@@ -12,7 +13,10 @@ from sam_lora_image_encoder import LoRA_Sam
 from segment_anything import sam_model_registry
 
 from trainer import trainer_synapse
+from trainer_thyroid import trainer_thyroid
 from icecream import ic
+from torch.utils.data import DataLoader
+from torchvision import transforms
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
@@ -27,7 +31,7 @@ parser.add_argument('--num_classes', type=int,
 parser.add_argument('--max_iterations', type=int,
                     default=30000, help='maximum epoch number to train')
 parser.add_argument('--max_epochs', type=int,
-                    default=200, help='maximum epoch number to train')
+                    default=1, help='maximum epoch number to train')
 parser.add_argument('--stop_epoch', type=int,
                     default=160, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int,
@@ -35,7 +39,7 @@ parser.add_argument('--batch_size', type=int,
 parser.add_argument('--n_gpu', type=int, default=2, help='total gpu')
 parser.add_argument('--deterministic', type=int, default=1,
                     help='whether use deterministic training')
-parser.add_argument('--base_lr', type=float, default=0.005,
+parser.add_argument('--base_lr', type=float, default=0.0001,
                     help='segmentation network learning rate')
 parser.add_argument('--img_size', type=int,
                     default=512, help='input patch size of network input')
@@ -53,6 +57,11 @@ parser.add_argument('--warmup_period', type=int, default=250,
 parser.add_argument('--AdamW', action='store_true', help='If activated, use AdamW to finetune SAM model')
 parser.add_argument('--module', type=str, default='sam_lora_image_encoder')
 parser.add_argument('--dice_param', type=float, default=0.8)
+parser.add_argument('--spectral_prompt', action='store_true', help='Use spectral prompt (concatenated to input)')
+parser.add_argument('--spectral_prompt_cross_attention', action='store_true', help='Use spectral prompt with cross-attention')
+parser.add_argument('--prompt_conditioning', action='store_true', help='Use spectral mask to modulate LoRA layers (not as input channel)')
+parser.add_argument('--prompt_cross_attention', action='store_true', help='Use cross-attention with prompt tokens after patch embedding')
+parser.add_argument('--prompt_multi_scale', action='store_true', help='Inject prompt cross-attention after every transformer block (multi-scale)')
 args = parser.parse_args()
 
 if __name__ == "__main__":
@@ -90,16 +99,75 @@ if __name__ == "__main__":
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
 
+    # Set normalization and model input channels according to prompt mode
+    if args.spectral_prompt or args.spectral_prompt_cross_attention:
+        pixel_mean = [123.675, 116.28, 103.53, 0.0]
+        pixel_std = [58.395, 57.12, 57.375, 1.0]
+    else:
+        pixel_mean = [123.675, 116.28, 103.53]
+        pixel_std = [58.395, 57.12, 57.375]
+
     # register model
     sam, img_embedding_size = sam_model_registry[args.vit_name](image_size=args.img_size,
                                                                 num_classes=args.num_classes,
-                                                                checkpoint=args.ckpt, pixel_mean=[0, 0, 0],
-                                                                pixel_std=[1, 1, 1])
+                                                                checkpoint=args.ckpt, pixel_mean=pixel_mean,
+                                                                pixel_std=pixel_std)
 
-    pkg = import_module(args.module)
-    net = pkg.LoRA_Sam(sam, args.rank).cuda()
+    if args.ckpt is not None and os.path.isfile(args.ckpt):
+        checkpoint = torch.load(args.ckpt, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+        if 'state_dict' in checkpoint:
+            model_state = checkpoint['state_dict']
+        else:
+            model_state = checkpoint
+        try:
+            sam.load_state_dict(model_state, strict=False)
+            print(f"Loaded weights from {args.ckpt}")
+        except Exception as e:
+            print(f"Failed to load weights from {args.ckpt}: {e}")
+    else:
+        print(f"No valid checkpoint found at {args.ckpt}, training from scratch.")
 
-    # net = LoRA_Sam(sam, args.rank).cuda()
+    if args.module == 'sam_lora_image_encoder':
+        from sam_lora_image_encoder import LoRA_Sam
+        # Patch model to accept 4 channels ONLY if prompt is enabled
+        if args.spectral_prompt or args.spectral_prompt_cross_attention:
+            original_proj = sam.image_encoder.patch_embed.proj
+            if original_proj.in_channels == 3:
+                import torch.nn as nn
+                new_proj = nn.Conv2d(4, original_proj.out_channels, kernel_size=original_proj.kernel_size,
+                                     stride=original_proj.stride, padding=original_proj.padding)
+                with torch.no_grad():
+                    new_proj.weight[:, :3, :, :] = original_proj.weight.clone()
+                    new_proj.weight[:, 3:4, :, :] = original_proj.weight.mean(dim=1, keepdim=True)
+                    if original_proj.bias is not None:
+                        new_proj.bias = nn.Parameter(original_proj.bias.clone())
+                sam.image_encoder.patch_embed.proj = new_proj
+            # else: already 4 channels, do nothing
+        net = LoRA_Sam(sam_model=sam, 
+                      r=args.rank, 
+                      use_spectral_prompt=args.spectral_prompt,
+                      prompt_conditioning=args.prompt_conditioning,
+                      prompt_cross_attention=args.prompt_cross_attention or args.spectral_prompt_cross_attention,
+                      prompt_multi_scale=args.prompt_multi_scale,
+                      img_size=args.img_size,
+                      patch_size=16,
+                      embed_dim=768,
+                      num_heads=12,
+                      num_prompt_tokens=8).cuda()
+
+    # Patch mask decoder for BUSI to ensure correct output channels
+    if args.dataset == "BUSI":
+        mask_decoder = net.sam.mask_decoder
+        num_mask_tokens = len(mask_decoder.output_hypernetworks_mlps)
+        transformer_dim = mask_decoder.output_hypernetworks_mlps[0].layers[0].in_features
+        hypernet_out_dim = mask_decoder.output_hypernetworks_mlps[0].layers[-1].out_features  # restore original output dim (usually 32)
+        from segment_anything.modeling.mask_decoder import MLP
+        mask_decoder.output_hypernetworks_mlps = torch.nn.ModuleList([
+            MLP(transformer_dim, transformer_dim, hypernet_out_dim, 3)
+            for _ in range(num_mask_tokens)
+        ])
+        mask_decoder.output_hypernetworks_mlps = mask_decoder.output_hypernetworks_mlps.to(next(net.parameters()).device)
+
     if args.lora_ckpt is not None:
         net.load_lora_parameters(args.lora_ckpt)
 
@@ -118,5 +186,71 @@ if __name__ == "__main__":
     with open(config_file, 'w') as f:
         f.writelines(config_items)
 
-    trainer = {'Synapse': trainer_synapse}
-    trainer[dataset_name](args, net, snapshot_path, multimask_output, low_res)
+    # Set up transforms for each dataset
+    if args.dataset == "Thyroid":
+        from datasets.thyroid_transforms import ThyroidRandomGenerator
+        use_spectral_prompt = args.spectral_prompt or args.spectral_prompt_cross_attention
+        train_transform = ThyroidRandomGenerator(output_size=(args.img_size, args.img_size), num_classes=args.num_classes)
+        val_transform = ThyroidRandomGenerator(output_size=(args.img_size, args.img_size), num_classes=args.num_classes)
+        from datasets.dataset_thyroid import ThyroidDataset as DatasetClass
+        train_dataset = DatasetClass(args.root_path, transform=train_transform, spectral_prompt=use_spectral_prompt)
+        val_dataset = DatasetClass(args.root_path, split="val", transform=val_transform, spectral_prompt=use_spectral_prompt)
+        test_dataset = DatasetClass(args.root_path, split="test", transform=val_transform, spectral_prompt=use_spectral_prompt)
+        trainloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        valloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+        testloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    elif args.dataset == "SegThy":
+        from datasets.dataset_thyroid import ThyroidDataset as DatasetClass
+        train_dataset = DatasetClass(args.root_path, split="train", transform=train_transform, spectral_prompt=args.spectral_prompt)
+        val_dataset = DatasetClass(args.root_path, split="val", transform=val_transform, spectral_prompt=args.spectral_prompt)
+        test_dataset = DatasetClass(args.root_path, split="test", transform=val_transform, spectral_prompt=args.spectral_prompt)
+        trainloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        valloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+        testloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    elif args.dataset == "BUSI":
+        from datasets.busi_transforms import BUSIRandomGenerator
+        train_transform = BUSIRandomGenerator()
+        val_transform = BUSIRandomGenerator()
+        from datasets.dataset_busi import BUSIDataset as DatasetClass
+        train_dataset = DatasetClass(args.root_path, split="train", transform=train_transform, spectral_prompt=args.spectral_prompt)
+        val_dataset = DatasetClass(args.root_path, split="val", transform=val_transform, spectral_prompt=args.spectral_prompt)
+        test_dataset = DatasetClass(args.root_path, split="test", transform=val_transform, spectral_prompt=args.spectral_prompt)
+        trainloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        valloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+        testloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    else:
+        from torchvision import transforms
+        train_transform = transforms.Compose([
+            transforms.ToTensor()
+        ])
+        val_transform = transforms.Compose([
+            transforms.ToTensor()
+        ])
+
+    # Import trainers
+    from trainer_thyroid import trainer_thyroid
+    if args.dataset == "BUSI":
+        from trainer_busi import trainer_busi
+
+    # Define trainer functions for each dataset
+    trainer = {
+        "BUSI": trainer_busi if args.dataset == "BUSI" else None,
+        "Thyroid": trainer_thyroid
+    }
+
+    # Determine prompt type
+    prompt_type = "no_prompt"
+    if args.spectral_prompt:
+        prompt_type = "spectral_prompt"
+    elif args.spectral_prompt_cross_attention:
+        prompt_type = "spectral_prompt_cross_attention"
+    
+    # Call the appropriate trainer with the prompt type
+    if dataset_name == "Thyroid":
+        trainer[dataset_name](args, net, snapshot_path, multimask_output, low_res, prompt_type, trainloader, valloader)
+    elif dataset_name == "BUSI":
+        trainer[dataset_name](args, net, snapshot_path, multimask_output, low_res, trainloader, valloader, testloader)
+    elif dataset_name == "SegThy":
+        trainer[dataset_name](args, net, snapshot_path, multimask_output, low_res, trainloader, valloader, testloader)
+    else:
+        trainer[dataset_name](args, net, snapshot_path, multimask_output, low_res, trainloader, valloader)

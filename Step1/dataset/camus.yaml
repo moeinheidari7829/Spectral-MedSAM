@@ -1,0 +1,12 @@
+name: CAMUS
+dataset_root: CAMUS/
+dataset_type: folders
+images_root: images
+list: lists/images.txt
+gt_dir: labels
+pred_dir: null
+n_classes: 3
+features_dir: null
+preprocessed_dir: null
+derained_dir: null
+eigenseg_dir: null

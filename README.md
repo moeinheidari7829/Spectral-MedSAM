@@ -62,3 +62,15 @@ See the main repo for citation and license information.
 ---
 
 For any questions, please open an issue in the GitHub repo.
+
+
+
+## Acknowledgments
+
+We gratefully acknowledge the contributions of the following projects, which played a key role in enabling this work:
+
+- **MedSAM**: We utilized the Medical Segment Anything Model (MedSAM) as part of our methodology.
+
+- **[UnsupervisedSegmentor4Ultrasound](https://github.com/alexaatm/UnsupervisedSegmentor4Ultrasound)**: We used this repository to generate the clusters in the first step.
+
+Special thanks to the developers and contributors of both repositories for their impactful work and open-source spirit.

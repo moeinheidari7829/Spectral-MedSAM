@@ -19,7 +19,7 @@ First, download the datasets from the following sources:
 
 ### Data Preparation
 The data structure files are in the `data_structure` folder for both datasets. Please use these files to prepare the datasets in the format expected by the Deep Spectral Method. 
-- Ensure to add tthe correct pathes
+- Ensure to add the correct pathes
   
 ### Configuration Files
 Place the datasets folder inside the config folder of the Deep Spectral repository.

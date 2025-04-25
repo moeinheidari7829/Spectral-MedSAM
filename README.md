@@ -69,7 +69,7 @@ For any questions, please open an issue in the GitHub repo.
 
 We gratefully acknowledge the contributions of the following projects, which played a key role in enabling this work:
 
-- **MedSAM**: We utilized the Medical Segment Anything Model (MedSAM) as part of our methodology.
+- **[SAMed](https://github.com/hitachinsk/SAMed)**: We utilized the SAMed model as the main part of our methodology for fine-tunning.
 
 - **[UnsupervisedSegmentor4Ultrasound](https://github.com/alexaatm/UnsupervisedSegmentor4Ultrasound)**: We used this repository to generate the clusters in the first step.
 
